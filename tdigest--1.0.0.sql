@@ -225,81 +225,46 @@ CREATE OR REPLACE FUNCTION tdigest_count(tdigest)
     AS 'tdigest', 'tdigest_count'
     LANGUAGE C IMMUTABLE STRICT;
 
-CREATE OR REPLACE FUNCTION equiwidth_histogram(p_digest tdigest, p_bins int)
-RETURNS TABLE (bin_start double precision,
-               bin_end double precision,
-               bin_density double precision)
-AS $$
+CREATE OR REPLACE AGGREGATE tdigest_merge(tdigest) (
+    SFUNC = tdigest_add_digest,
+    STYPE = internal,
+    FINALFUNC = tdigest_digest,
+    SERIALFUNC = tdigest_serial,
+    DESERIALFUNC = tdigest_deserial,
+    COMBINEFUNC = tdigest_combine,
+    PARALLEL = SAFE
+);
 
-    WITH
-      range  AS (SELECT tdigest_percentile(p_digest, 0.0) AS min_value, tdigest_percentile(p_digest, 1.0) AS max_value),
-      bounds AS (SELECT
-                     range.min_value + (i - 1) * (range.max_value - range.min_value) / p_bins AS bin_start,
-                     range.min_value + i * (range.max_value - range.min_value) / p_bins AS bin_end
-                 FROM range, generate_series(1,p_bins) AS s(i))
-      SELECT
-          bounds.bin_start,
-          bounds.bin_end,
-          tdigest_percentile_of(p_digest, bounds.bin_end) - tdigest_percentile_of(p_digest, bounds.bin_start)
-      FROM bounds
-      GROUP BY 1, 2
-      ORDER BY 1, 2;
+CREATE OR REPLACE FUNCTION equiwidth_histogram(tdigest, int)
+    RETURNS TABLE (
+        bin_start double precision,
+        bin_end double precision,
+        bin_density double precision,
+        bin_count double precision  -- New column
+    )
+    AS 'tdigest', 'tdigest_equiwidth_histogram'
+    LANGUAGE C IMMUTABLE STRICT;
 
-$$ LANGUAGE sql;
+/*
+-- test func accuracy with a uniform distribution
+WITH hist AS (
+    SELECT * FROM equiwidth_histogram(
+        (SELECT tdigest(i, 100) FROM generate_series(1, 1000) s(i)),
+        10
+    )
+);
+SELECT
+    sum(bin_density) AS total_density, -- Should be ~1.0
+    sum(bin_count) AS total_count      -- Should be ~1000.0
+FROM hist;
+*/
 
-CREATE OR REPLACE FUNCTION tdigest_merge(tdigests tdigest[])
-RETURNS tdigest
-AS $$
-
-DECLARE
-    ret tdigest;
-    current tdigest;
-
-BEGIN
-
-    IF array_length(tdigests, 1) IS NULL THEN
-        RETURN NULL;
-    END IF;
-
-    ret := tdigests[1];
-
-    FOR i IN 2..array_upper(tdigests, 1) LOOP
-        current := tdigests[i];
-        IF current IS NOT NULL THEN
-            ret := tdigest_union(ret, current);
-        END IF;
-    END LOOP;
-
-    RETURN ret;
-
-END;
-
-$$ LANGUAGE plpgsql;
-
---- SELECT equiwidth_histogram(merged_td, 10) FROM (
----         SELECT tdigest_merge(array_agg(td)) AS merged_td
----         FROM tdigests
----     )
---- ;
-
-
-CREATE OR REPLACE FUNCTION equiheight_histogram(p_digest tdigest, p_bins int)
-RETURNS TABLE (bin_start double precision,
-               bin_end double precision,
-               bin_density double precision)
-AS $$
-
-    WITH
-      freqs AS (SELECT
-                     (i - 1)::double precision / p_bins AS freq_start,
-                     i::double precision / p_bins AS freq_end
-                 FROM generate_series(1,p_bins) AS s(i))
-      SELECT
-          tdigest_percentile(p_digest, freqs.freq_start),
-          tdigest_percentile(p_digest, freqs.freq_end),
-          freqs.freq_end - freqs.freq_start
-      FROM freqs
-      GROUP BY freqs.freq_start, freqs.freq_end
-      ORDER BY 1, 2;
-
-$$ LANGUAGE sql;
+CREATE OR REPLACE FUNCTION equiheight_histogram(tdigest, int)
+    RETURNS TABLE (
+        bin_start double precision,
+        bin_end double precision,
+        bin_density double precision,
+        bin_count double precision  -- New column
+    )
+    AS 'tdigest', 'tdigest_equiheight_histogram'
+    LANGUAGE C IMMUTABLE STRICT;

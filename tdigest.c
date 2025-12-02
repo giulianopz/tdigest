@@ -13,6 +13,7 @@
 #include <limits.h>
 
 #include "postgres.h"
+#include "funcapi.h"
 #include "libpq/pqformat.h"
 #include "utils/array.h"
 #include "utils/builtins.h"
@@ -3417,4 +3418,237 @@ double_to_array(FunctionCallInfo fcinfo, double *d, int len)
 
 	PG_RETURN_ARRAYTYPE_P(DatumGetPointer(makeArrayResult(astate,
 										  CurrentMemoryContext)));
+}
+
+
+/* Register the function */
+PG_FUNCTION_INFO_V1(tdigest_equiwidth_histogram);
+
+/* Context struct to persist state between set-returning calls */
+typedef struct {
+    double *edges;
+    double *cdfs;
+    int     nbins;
+    double  total_count; /* Added: store the total count from the digest */
+} EquiWidthCtx;
+
+Datum
+tdigest_equiwidth_histogram(PG_FUNCTION_ARGS)
+{
+    FuncCallContext    *funcctx;
+    EquiWidthCtx       *user_ctx;
+    int                 call_cntr;
+    int                 max_calls;
+
+    /* First call: Setup and heavy lifting */
+    if (SRF_IS_FIRSTCALL())
+    {
+        MemoryContext       oldcontext;
+        tdigest_t          *digest;
+        tdigest_aggstate_t *state;
+        int                 nbins;
+        double              min_val, max_val, step;
+        int                 i;
+
+        funcctx = SRF_FIRSTCALL_INIT();
+        oldcontext = MemoryContextSwitchTo(funcctx->multi_call_memory_ctx);
+
+        if (PG_ARGISNULL(0) || PG_ARGISNULL(1))
+             SRF_RETURN_DONE(funcctx);
+
+        digest = (tdigest_t *) PG_DETOAST_DATUM(PG_GETARG_DATUM(0));
+        nbins = PG_GETARG_INT32(1);
+
+        if (nbins < 1)
+            elog(ERROR, "number of bins must be at least 1");
+
+        state = tdigest_digest_to_aggstate(digest);
+        tdigest_compact(state);
+
+        if (state->ncentroids == 0)
+             SRF_RETURN_DONE(funcctx);
+
+        min_val = state->centroids[0].mean;
+        max_val = state->centroids[state->ncentroids - 1].mean;
+
+        /* We need nbins + 1 edges */
+        state->nvalues = nbins + 1;
+        state->values = palloc(sizeof(double) * state->nvalues);
+
+        user_ctx = palloc(sizeof(EquiWidthCtx));
+        user_ctx->edges = state->values;
+        user_ctx->cdfs = palloc(sizeof(double) * state->nvalues);
+        user_ctx->nbins = nbins;
+
+        /* Capture the total count from the digest */
+        user_ctx->total_count = (double)digest->count;
+
+        step = (max_val - min_val) / nbins;
+
+        for (i = 0; i <= nbins; i++)
+        {
+            if (i == nbins)
+                state->values[i] = max_val;
+            else
+                state->values[i] = min_val + i * step;
+        }
+
+        tdigest_compute_quantiles_of(state, user_ctx->cdfs);
+
+        funcctx->user_fctx = user_ctx;
+        funcctx->max_calls = nbins;
+
+        if (get_call_result_type(fcinfo, NULL, &funcctx->tuple_desc) != TYPEFUNC_COMPOSITE)
+            ereport(ERROR,
+                    (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                     errmsg("function returning record called in context that cannot accept type record")));
+        BlessTupleDesc(funcctx->tuple_desc);
+
+        MemoryContextSwitchTo(oldcontext);
+    }
+
+    funcctx = SRF_PERCALL_SETUP();
+    user_ctx = (EquiWidthCtx *) funcctx->user_fctx;
+    call_cntr = funcctx->call_cntr;
+    max_calls = funcctx->max_calls;
+
+    if (call_cntr < max_calls)
+    {
+        /* We now return 4 values */
+        Datum       values[4];
+        bool        nulls[4] = {false, false, false, false};
+        HeapTuple   tuple;
+        double      density;
+        double      estimated_count;
+
+        /* bin_start */
+        values[0] = Float8GetDatum(user_ctx->edges[call_cntr]);
+        /* bin_end */
+        values[1] = Float8GetDatum(user_ctx->edges[call_cntr+1]);
+
+        /* bin_density */
+        density = user_ctx->cdfs[call_cntr+1] - user_ctx->cdfs[call_cntr];
+        if (density < 0) density = 0.0;
+        values[2] = Float8GetDatum(density);
+
+        /* bin_count: density * total_count */
+        estimated_count = density * user_ctx->total_count;
+        values[3] = Float8GetDatum(estimated_count);
+
+        tuple = heap_form_tuple(funcctx->tuple_desc, values, nulls);
+        SRF_RETURN_NEXT(funcctx, HeapTupleGetDatum(tuple));
+    }
+
+    SRF_RETURN_DONE(funcctx);
+}
+
+/* Register the function */
+PG_FUNCTION_INFO_V1(tdigest_equiheight_histogram);
+
+typedef struct {
+    double *cutpoints;
+    int     nbins;
+    double  total_count; /* Store total count from digest */
+} EquiHeightCtx;
+
+Datum
+tdigest_equiheight_histogram(PG_FUNCTION_ARGS)
+{
+    FuncCallContext    *funcctx;
+    EquiHeightCtx      *user_ctx;
+    int                 call_cntr;
+    int                 max_calls;
+
+    if (SRF_IS_FIRSTCALL())
+    {
+        MemoryContext       oldcontext;
+        tdigest_t          *digest;
+        tdigest_aggstate_t *state;
+        int                 nbins;
+        int                 i;
+
+        funcctx = SRF_FIRSTCALL_INIT();
+        oldcontext = MemoryContextSwitchTo(funcctx->multi_call_memory_ctx);
+
+        if (PG_ARGISNULL(0) || PG_ARGISNULL(1))
+             SRF_RETURN_DONE(funcctx);
+
+        digest = (tdigest_t *) PG_DETOAST_DATUM(PG_GETARG_DATUM(0));
+        nbins = PG_GETARG_INT32(1);
+
+        if (nbins < 1)
+            elog(ERROR, "number of bins must be at least 1");
+
+        /* Convert to state to allow quantile computation */
+        state = tdigest_digest_to_aggstate(digest);
+
+        /* Prepare context */
+        user_ctx = palloc(sizeof(EquiHeightCtx));
+        user_ctx->nbins = nbins;
+        user_ctx->total_count = (double)digest->count; /* Capture count */
+
+        /* * Prepare requested percentiles.
+         * We need nbins + 1 points: 0.0, 1/N, ... 1.0
+         */
+        state->npercentiles = nbins + 1;
+        state->percentiles = palloc(sizeof(double) * state->npercentiles);
+
+        for (i = 0; i <= nbins; i++)
+            state->percentiles[i] = (double)i / (double)nbins;
+
+        /* Allocate result array for the cutpoints */
+        user_ctx->cutpoints = palloc(sizeof(double) * state->npercentiles);
+
+        /* * The Heavy Lifting:
+         * Sorts the digest ONCE and computes all bin edges (Inverse CDF).
+         */
+        tdigest_compute_quantiles(state, user_ctx->cutpoints);
+
+        funcctx->user_fctx = user_ctx;
+        funcctx->max_calls = nbins;
+
+        /* Create a tuple descriptor for 4 columns */
+        if (get_call_result_type(fcinfo, NULL, &funcctx->tuple_desc) != TYPEFUNC_COMPOSITE)
+            ereport(ERROR,
+                    (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                     errmsg("function returning record called in context that cannot accept type record")));
+        BlessTupleDesc(funcctx->tuple_desc);
+
+        MemoryContextSwitchTo(oldcontext);
+    }
+
+    funcctx = SRF_PERCALL_SETUP();
+    user_ctx = (EquiHeightCtx *) funcctx->user_fctx;
+    call_cntr = funcctx->call_cntr;
+    max_calls = funcctx->max_calls;
+
+    if (call_cntr < max_calls)
+    {
+        Datum       values[4];
+        bool        nulls[4] = {false, false, false, false};
+        HeapTuple   tuple;
+        double      density;
+        double      estimated_count;
+
+        /* bin_start */
+        values[0] = Float8GetDatum(user_ctx->cutpoints[call_cntr]);
+        /* bin_end */
+        values[1] = Float8GetDatum(user_ctx->cutpoints[call_cntr + 1]);
+
+        /* * For equi-height, density is uniform by definition: 1.0 / nbins.
+         * Note: The last bin might technically handle slightly more/less mass due
+         * to discrete items, but for estimation 1/N is the definition.
+         */
+        density = 1.0 / (double)max_calls;
+        values[2] = Float8GetDatum(density);
+
+        /* bin_count = total_count / nbins */
+        estimated_count = user_ctx->total_count * density;
+        values[3] = Float8GetDatum(estimated_count);
+
+        tuple = heap_form_tuple(funcctx->tuple_desc, values, nulls);
+        SRF_RETURN_NEXT(funcctx, HeapTupleGetDatum(tuple));
+    }
+
+    SRF_RETURN_DONE(funcctx);
 }

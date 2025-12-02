@@ -2,5 +2,6 @@
 results/
 **/*.o
 **/*.so
+**/*.bc
 regression.diffs
 regression.out
