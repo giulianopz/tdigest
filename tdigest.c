@@ -18,6 +18,10 @@
 #include "utils/builtins.h"
 #include "utils/lsyscache.h"
 #include "catalog/pg_type.h"
+#include "funcapi.h"
+#if PG_VERSION_NUM < 120000
+#include "access/htup_details.h"
+#endif
 
 PG_MODULE_MAGIC;
 
@@ -154,6 +158,9 @@ PG_FUNCTION_INFO_V1(tdigest_trimmed_sum);
 
 PG_FUNCTION_INFO_V1(tdigest_digest_sum);
 PG_FUNCTION_INFO_V1(tdigest_digest_avg);
+
+PG_FUNCTION_INFO_V1(tdigest_equiwidth_histogram);
+PG_FUNCTION_INFO_V1(tdigest_equiheight_histogram);
 
 Datum tdigest_add_double_array(PG_FUNCTION_ARGS);
 Datum tdigest_add_double_array_count(PG_FUNCTION_ARGS);
@@ -3417,4 +3424,227 @@ double_to_array(FunctionCallInfo fcinfo, double *d, int len)
 
 	PG_RETURN_ARRAYTYPE_P(DatumGetPointer(makeArrayResult(astate,
 										  CurrentMemoryContext)));
+}
+
+/* context struct to persist state between set-returning calls */
+typedef struct
+{
+	double	   *edges;
+	double	   *cdfs;
+	int			nbins;
+	double		total_count;
+}			EquiWidthCtx;
+
+Datum
+tdigest_equiwidth_histogram(PG_FUNCTION_ARGS)
+{
+	FuncCallContext *funcctx;
+	EquiWidthCtx *user_ctx;
+	int			call_cntr;
+	int			max_calls;
+
+	if (SRF_IS_FIRSTCALL())
+	{
+		MemoryContext oldcontext;
+		tdigest_t  *digest;
+		tdigest_aggstate_t *state;
+		int			nbins;
+		double		min_val,
+					max_val,
+					step;
+		int			i;
+
+		funcctx = SRF_FIRSTCALL_INIT();
+		oldcontext = MemoryContextSwitchTo(funcctx->multi_call_memory_ctx);
+
+		digest = (tdigest_t *) PG_DETOAST_DATUM(PG_GETARG_DATUM(0));
+		nbins = PG_GETARG_INT32(1);
+
+		if (nbins < 1)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("number of bins must be at least 1")));
+
+		state = tdigest_digest_to_aggstate(digest);
+
+		/*
+		 * needed to read min/max before CDF computation (which also compacts
+		 * internally)
+		 */
+		tdigest_compact(state);
+
+		if (state->ncentroids == 0)
+			SRF_RETURN_DONE(funcctx);
+
+		min_val = state->centroids[0].mean;
+		max_val = state->centroids[state->ncentroids - 1].mean;
+
+		state->nvalues = nbins + 1;
+		state->values = palloc(sizeof(double) * state->nvalues);
+
+		user_ctx = palloc(sizeof(EquiWidthCtx));
+		user_ctx->edges = state->values;
+		user_ctx->cdfs = palloc(sizeof(double) * state->nvalues);
+		user_ctx->nbins = nbins;
+
+		user_ctx->total_count = (double) digest->count;
+
+		step = (max_val - min_val) / nbins;
+
+		for (i = 0; i <= nbins; i++)
+		{
+			if (i == nbins)
+				state->values[i] = max_val;
+			else
+				state->values[i] = min_val + i * step;
+		}
+
+		tdigest_compute_quantiles_of(state, user_ctx->cdfs);
+
+		funcctx->user_fctx = user_ctx;
+		funcctx->max_calls = nbins;
+
+		if (get_call_result_type(fcinfo, NULL, &funcctx->tuple_desc) != TYPEFUNC_COMPOSITE)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("function returning record called in context that cannot accept type record")));
+		BlessTupleDesc(funcctx->tuple_desc);
+
+		MemoryContextSwitchTo(oldcontext);
+	}
+
+	funcctx = SRF_PERCALL_SETUP();
+	user_ctx = (EquiWidthCtx *) funcctx->user_fctx;
+	call_cntr = funcctx->call_cntr;
+	max_calls = funcctx->max_calls;
+
+	if (call_cntr < max_calls)
+	{
+		/* We now return 4 values */
+		Datum		values[4];
+		bool		nulls[4] = {false, false, false, false};
+		HeapTuple	tuple;
+		double		density;
+		double		estimated_count;
+
+		/* bin_start */
+		values[0] = Float8GetDatum(user_ctx->edges[call_cntr]);
+		/* bin_end */
+		values[1] = Float8GetDatum(user_ctx->edges[call_cntr + 1]);
+
+		/* bin_density */
+		density = user_ctx->cdfs[call_cntr + 1] - user_ctx->cdfs[call_cntr];
+		if (density < 0)
+			density = 0.0;
+		values[2] = Float8GetDatum(density);
+
+		/* bin_count: density * total_count */
+		estimated_count = density * user_ctx->total_count;
+		values[3] = Float8GetDatum(estimated_count);
+
+		tuple = heap_form_tuple(funcctx->tuple_desc, values, nulls);
+		SRF_RETURN_NEXT(funcctx, HeapTupleGetDatum(tuple));
+	}
+
+	SRF_RETURN_DONE(funcctx);
+}
+
+/* context struct to persist state between set-returning calls */
+typedef struct
+{
+	double	   *cutpoints;
+	int			nbins;
+	double		total_count;
+}			EquiHeightCtx;
+
+Datum
+tdigest_equiheight_histogram(PG_FUNCTION_ARGS)
+{
+	FuncCallContext *funcctx;
+	EquiHeightCtx *user_ctx;
+	int			call_cntr;
+	int			max_calls;
+
+	if (SRF_IS_FIRSTCALL())
+	{
+		MemoryContext oldcontext;
+		tdigest_t  *digest;
+		tdigest_aggstate_t *state;
+		int			nbins;
+		int			i;
+
+		digest = (tdigest_t *) PG_DETOAST_DATUM(PG_GETARG_DATUM(0));
+		nbins = PG_GETARG_INT32(1);
+
+		if (nbins < 1)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("number of bins must be at least 1")));
+
+		funcctx = SRF_FIRSTCALL_INIT();
+		oldcontext = MemoryContextSwitchTo(funcctx->multi_call_memory_ctx);
+
+		/* convert to state to allow quantile computation */
+		state = tdigest_digest_to_aggstate(digest);
+
+		if (state->ncentroids == 0)
+			SRF_RETURN_DONE(funcctx);
+
+		user_ctx = palloc(sizeof(EquiHeightCtx));
+		user_ctx->nbins = nbins;
+		user_ctx->total_count = (double) digest->count;
+
+		state->npercentiles = nbins + 1;
+		state->percentiles = palloc(sizeof(double) * state->npercentiles);
+
+		for (i = 0; i <= nbins; i++)
+			state->percentiles[i] = (double) i / (double) nbins;
+
+		user_ctx->cutpoints = palloc(sizeof(double) * state->npercentiles);
+
+		tdigest_compute_quantiles(state, user_ctx->cutpoints);
+
+		funcctx->user_fctx = user_ctx;
+		funcctx->max_calls = nbins;
+
+		if (get_call_result_type(fcinfo, NULL, &funcctx->tuple_desc) != TYPEFUNC_COMPOSITE)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("function returning record called in context that cannot accept type record")));
+		BlessTupleDesc(funcctx->tuple_desc);
+
+		MemoryContextSwitchTo(oldcontext);
+	}
+
+	funcctx = SRF_PERCALL_SETUP();
+	user_ctx = (EquiHeightCtx *) funcctx->user_fctx;
+	call_cntr = funcctx->call_cntr;
+	max_calls = funcctx->max_calls;
+
+	if (call_cntr < max_calls)
+	{
+		Datum		values[4];
+		bool		nulls[4] = {false, false, false, false};
+		HeapTuple	tuple;
+		double		density;
+		double		estimated_count;
+
+		/* bin_start */
+		values[0] = Float8GetDatum(user_ctx->cutpoints[call_cntr]);
+		/* bin_end */
+		values[1] = Float8GetDatum(user_ctx->cutpoints[call_cntr + 1]);
+
+		/* For equi-height, density is uniform by definition: 1.0 / nbins */
+		density = 1.0 / (double) max_calls;
+		values[2] = Float8GetDatum(density);
+
+		/* bin_count = total_count / nbins */
+		estimated_count = user_ctx->total_count * density;
+		values[3] = Float8GetDatum(estimated_count);
+
+		tuple = heap_form_tuple(funcctx->tuple_desc, values, nulls);
+		SRF_RETURN_NEXT(funcctx, HeapTupleGetDatum(tuple));
+	}
+
+	SRF_RETURN_DONE(funcctx);
 }

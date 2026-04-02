@@ -35,13 +35,13 @@ The extension provides two functions, which you can see as a replacement of
 
 That is, instead of running
 
-```
+```sql
 SELECT percentile_cont(0.95) WITHIN GROUP (ORDER BY a) FROM t
 ```
 
 you might now run
 
-```
+```sql
 SELECT tdigest_percentile(a, 100, 0.95) FROM t
 ```
 
@@ -103,7 +103,7 @@ functions (with `tdigest` as the first argument).
 
 So for example you may do this:
 
-```
+```sql
 -- table with some random source data
 CREATE TABLE t (a int, b int, c double precision);
 
@@ -119,20 +119,20 @@ SELECT a, tdigest_percentile(d, 0.95) FROM p GROUP BY a ORDER BY a;
 
 The pre-aggregated table is indeed much smaller:
 
-~~~
+```sql
 db=# \d+
                          List of relations
- Schema | Name | Type  | Owner | Persistence |  Size  | Description 
+ Schema | Name | Type  | Owner | Persistence |  Size  | Description
 --------+------+-------+-------+-------------+--------+-------------
- public | p    | table | user  | permanent   | 120 kB | 
- public | t    | table | user  | permanent   | 422 MB | 
+ public | p    | table | user  | permanent   | 120 kB |
+ public | t    | table | user  | permanent   | 422 MB |
 (2 rows)
-~~~
+```
 
 And on my machine the last query takes ~1.5ms. Compare that to queries on
 the source data:
 
-~~~
+```sql
 \timing on
 
 -- exact results
@@ -152,7 +152,7 @@ SET max_parallel_workers_per_gather = 4;
 SELECT a, tdigest_percentile(c, 100, 0.95) FROM t GROUP BY a ORDER BY a;
   ...
 Time: 893.538 ms
-~~~
+```
 
 This shows how much more efficient the t-digest estimate is compared to the
 exact query with `percentile_cont` (the difference would increase for larger
@@ -195,7 +195,7 @@ An existing t-digest may be updated incrementally, either by adding a single
 value, or by merging-in a whole t-digest. For example, it's possible to add
 1000 random values to the t-digest like this:
 
-```
+```sql
 DO LANGUAGE plpgsql $$
 DECLARE
   r record;
@@ -211,7 +211,7 @@ deserialized and serialized over and over, for each value we're adding.
 That overhead may be reduced by pre-aggregating data, either into an array
 or a t-digest.
 
-```
+```sql
 DO LANGUAGE plpgsql $$
 DECLARE
   a double precision[];
@@ -224,7 +224,7 @@ END $$;
 Alternatively, it's possible to use pre-aggregated t-digest values instead
 of the arrays:
 
-```
+```sql
 DO LANGUAGE plpgsql $$
 DECLARE
   r record;
@@ -243,7 +243,7 @@ be somewhat larger (by a factor of 10). It's advisable to use either the
 multi-value functions (with compaction after each batch) if possible, or
 force compaction, e.g. by doing something like this:
 
-```
+```sql
 UPDATE t SET d = tdigest_union(NULL, d);
 ```
 
@@ -269,7 +269,7 @@ specified accuracy.
 
 #### Synopsis
 
-```
+```sql
 SELECT tdigest_percentile(t.c, 100, 0.95) FROM t
 ```
 
@@ -287,7 +287,7 @@ specified accuracy.
 
 #### Synopsis
 
-```
+```sql
 SELECT tdigest_percentile(t.c, t.a, 100, 0.95) FROM t
 ```
 
@@ -306,7 +306,7 @@ specified accuracy.
 
 #### Synopsis
 
-```
+```sql
 SELECT tdigest_percentile(t.c, 100, ARRAY[0.95, 0.99]) FROM t
 ```
 
@@ -324,7 +324,7 @@ specified accuracy.
 
 #### Synopsis
 
-```
+```sql
 SELECT tdigest_percentile(t.c, t.a, 100, ARRAY[0.95, 0.99]) FROM t
 ```
 
@@ -343,7 +343,7 @@ specified accuracy.
 
 #### Synopsis
 
-```
+```sql
 SELECT tdigest_percentile_of(t.c, 100, 139832.3) FROM t
 ```
 
@@ -361,7 +361,7 @@ specified accuracy.
 
 #### Synopsis
 
-```
+```sql
 SELECT tdigest_percentile_of(t.c, t.a, 100, 139832.3) FROM t
 ```
 
@@ -380,7 +380,7 @@ the specified accuracy.
 
 #### Synopsis
 
-```
+```sql
 SELECT tdigest_percentile_of(t.c, 100, ARRAY[6343.43, 139832.3]) FROM t
 ```
 
@@ -398,7 +398,7 @@ the specified accuracy.
 
 #### Synopsis
 
-```
+```sql
 SELECT tdigest_percentile_of(t.c, t.a, 100, ARRAY[6343.43, 139832.3]) FROM t
 ```
 
@@ -416,7 +416,7 @@ Computes t-digest with the specified accuracy.
 
 #### Synopsis
 
-```
+```sql
 SELECT tdigest(t.c, 100) FROM t
 ```
 
@@ -433,7 +433,7 @@ as many occurrences as determined by the count parameter.
 
 #### Synopsis
 
-```
+```sql
 SELECT tdigest(t.c, t.a, 100) FROM t
 ```
 
@@ -450,7 +450,7 @@ Returns number of items represented by the t-digest.
 
 #### Synopsis
 
-```
+```sql
 SELECT tdigest_count(d) FROM (
     SELECT tdigest(t.c, 100) FROM t
 ) foo
@@ -463,7 +463,7 @@ Computes requested percentile from the pre-computed t-digests.
 
 #### Synopsis
 
-```
+```sql
 SELECT tdigest_percentile(d, 0.99) FROM (
     SELECT tdigest(t.c, 100) FROM t
 ) foo
@@ -481,7 +481,7 @@ Computes requested percentiles from the pre-computed t-digests.
 
 #### Synopsis
 
-```
+```sql
 SELECT tdigest_percentile(d, ARRAY[0.95, 0.99]) FROM (
     SELECT tdigest(t.c, 100) FROM t
 ) foo
@@ -499,7 +499,7 @@ Computes relative rank of a hypothetical value, using a pre-computed t-digest.
 
 #### Synopsis
 
-```
+```sql
 SELECT tdigest_percentile_of(d, 349834.1) FROM (
     SELECT tdigest(t.c, 100) FROM t
 ) foo
@@ -517,7 +517,7 @@ Computes relative ranks of hypothetical values, using a pre-computed t-digest.
 
 #### Synopsis
 
-```
+```sql
 SELECT tdigest_percentile_of(d, ARRAY[438.256, 349834.1]) FROM (
     SELECT tdigest(t.c, 100) FROM t
 ) foo
@@ -535,7 +535,7 @@ Performs incremental update of the t-digest by adding a single value.
 
 #### Synopsis
 
-```
+```sql
 UPDATE t SET d = tdigest_add(d, random());
 ```
 
@@ -553,7 +553,7 @@ Performs incremental update of the t-digest by adding values from an array.
 
 #### Synopsis
 
-```
+```sql
 UPDATE t SET d = tdigest_add(d, ARRAY[random(), random(), random()]);
 ```
 
@@ -571,7 +571,7 @@ Performs incremental update of the t-digest by merging-in another digest.
 
 #### Synopsis
 
-```
+```sql
 WITH x AS (SELECT tdigest(random(), 100) AS d FROM generate_series(1,1000))
 UPDATE t SET d = tdigest_union(t.d, x.d) FROM x;
 ```
@@ -591,7 +591,7 @@ cast from `tdigest` to `json`.
 
 #### Synopsis
 
-```
+```sql
 SELECT tdigest_json(d) FROM (
     SELECT tdigest(t.c, 100) AS d FROM t
 ) foo;
@@ -613,7 +613,7 @@ exposed as a cast from `tdigest` to `double precision[]`.
 
 #### Synopsis
 
-```
+```sql
 SELECT tdigest_double_array(d) FROM (
     SELECT tdigest(t.c, 100) AS d FROM t
 ) foo;
@@ -637,7 +637,7 @@ and high values will be discarded.
 
 #### Synopsis
 
-```
+```sql
 SELECT tdigest_avg(t.v, t.c, 100, 0.1, 0.9) FROM t
 ```
 
@@ -659,7 +659,7 @@ and high values will be discarded.
 
 #### Synopsis
 
-```
+```sql
 SELECT tdigest_avg(d, 0.05, 0.95) FROM (
     SELECT tdigest(t.c, 100) AS d FROM t
 ) foo;
@@ -681,7 +681,7 @@ and high values will be discarded.
 
 #### Synopsis
 
-```
+```sql
 SELECT tdigest_sum(t.v, 100, 0.1, 0.9) FROM t
 ```
 
@@ -702,7 +702,7 @@ and high values will be discarded.
 
 #### Synopsis
 
-```
+```sql
 SELECT tdigest_sum(t.v, t.c, 100, 0.1, 0.9) FROM t
 ```
 
@@ -724,7 +724,7 @@ and high values will be discarded.
 
 #### Synopsis
 
-```
+```sql
 SELECT tdigest_sum(d, 0.05, 0.95) FROM (
     SELECT tdigest(t.c, 100) AS d FROM t
 ) foo;
@@ -743,7 +743,7 @@ Calculates average of values between the low and high threshold.
 
 #### Synopsis
 
-```
+```sql
 SELECT tdigest_avg(tdigest(v, 100), 0.25, 0.75) FROM generate_series(1,10000)
 ```
 
@@ -760,7 +760,7 @@ Calculates sum of values between the low and high threshold.
 
 #### Synopsis
 
-```
+```sql
 SELECT tdigest_sum(tdigest(v, 100), 0.25, 0.75) FROM generate_series(1,10000)
 ```
 
@@ -770,6 +770,63 @@ SELECT tdigest_sum(tdigest(v, 100), 0.25, 0.75) FROM generate_series(1,10000)
 - `low` - low threshold (truncate values below)
 - `high` - high threshold (truncate values above)
 
+### `equiwidth_histogram(tdigest, int)`
+
+Build a equiwidth histogram from a tdigest.
+
+#### Synopsis
+
+```sql
+WITH digest AS (SELECT tdigest(i / 10000.0, 100) AS d FROM generate_series(1, 10000) s(i))
+SELECT * FROM equiwidth_histogram((SELECT d FROM digest), 10)
+
+      bin_start      │       bin_end       │     bin_density     │     bin_count
+─────────────────────┼─────────────────────┼─────────────────────┼───────────────────
+              0.0001 │         0.099194005 │         0.099144005 │ 991.4400499999999
+         0.099194005 │          0.19828801 │         0.099044005 │         990.44005
+          0.19828801 │         0.297382015 │ 0.09909400499999996 │ 990.9400499999996
+         0.297382015 │          0.39647602 │ 0.09914400499999998 │ 991.4400499999998
+          0.39647602 │ 0.49557002499999997 │ 0.09904400500000016 │ 990.4400500000015
+ 0.49557002499999997 │          0.59466403 │ 0.09914400499999981 │ 991.4400499999981
+          0.59466403 │         0.693758035 │ 0.09909400500000043 │ 990.9400500000042
+         0.693758035 │          0.79285204 │ 0.09904400499999966 │ 990.4400499999965
+          0.79285204 │         0.891946045 │ 0.09914400499999987 │ 991.4400499999987
+         0.891946045 │          0.99104005 │  0.0990940050000001 │  990.940050000001
+```
+
+#### Parameters
+
+- `tdigest` - t-digest to build the histogram from
+- `int` - the num of bins
+
+### `equiheight_histogram(tdigest, int)`
+
+Build a equiheight histogram from a tdigest.
+
+#### Synopsis
+
+```sql
+WITH digest AS (SELECT tdigest(i / 10000.0, 100) AS d FROM generate_series(1, 10000) s(i))
+SELECT * FROM equiheight_histogram((SELECT d FROM digest), 10)
+
+      bin_start      │       bin_end       │ bin_density │ bin_count
+─────────────────────┼─────────────────────┼─────────────┼───────────
+              0.0001 │ 0.10005000000000001 │         0.1 │      1000
+ 0.10005000000000001 │             0.20005 │         0.1 │      1000
+             0.20005 │ 0.30005000000000004 │         0.1 │      1000
+ 0.30005000000000004 │ 0.40005000000000007 │         0.1 │      1000
+ 0.40005000000000007 │  0.5000499999999999 │         0.1 │      1000
+  0.5000499999999999 │  0.6000500000000001 │         0.1 │      1000
+  0.6000500000000001 │  0.7000499999999997 │         0.1 │      1000
+  0.7000499999999997 │  0.8000499999999999 │         0.1 │      1000
+  0.8000499999999999 │             0.90005 │         0.1 │      1000
+             0.90005 │                   1 │         0.1 │      1000
+```
+
+#### Parameters
+
+- `tdigest` - t-digest to build the histogram from
+- `int` - the num of bins
 
 Notes
 -----
