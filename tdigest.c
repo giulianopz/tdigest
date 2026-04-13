@@ -761,32 +761,40 @@ tdigest_add(tdigest_aggstate_t *state, double v)
 }
 
 /*
- * Add a centroid (possibly with count not equal to 1) to the t-digest,
- * triggers a compaction when buffer full.
+ * Bulk-add an array of centroids to the t-digest. Copies centroids via
+ * memcpy and only checks for compaction once per batch, which is more
+ * efficient than adding centroids one at a time.
  */
 static void
-tdigest_add_centroid(tdigest_aggstate_t *state, double mean, int64 count)
+tdigest_add_centroids_bulk(tdigest_aggstate_t *state,
+						   centroid_t *centroids, int ncentroids)
 {
-	int	compression = state->compression;
-	int	ncentroids = state->ncentroids;
+	int	bufsize = BUFFER_SIZE(state->compression);
+	int	remaining = ncentroids;
+	int	offset = 0;
 
-	AssertCheckTDigestAggState(state);
+	while (remaining > 0)
+	{
+		int		space = bufsize - state->ncentroids;
+		int		batch = (remaining < space) ? remaining : space;
+		int64	batch_count = 0;
+		int		i;
 
-	/* make sure we have space for the value */
-	Assert(state->ncentroids < BUFFER_SIZE(compression));
+		memcpy(&state->centroids[state->ncentroids],
+			   &centroids[offset],
+			   batch * sizeof(centroid_t));
 
-	/* for a single point, the value is both sum and mean */
-	state->centroids[ncentroids].count = count;
-	state->centroids[ncentroids].mean = mean;
-	state->ncentroids++;
-	state->count += count;
+		for (i = offset; i < offset + batch; i++)
+			batch_count += centroids[i].count;
 
-	Assert(state->ncentroids <= BUFFER_SIZE(compression));
+		state->ncentroids += batch;
+		state->count += batch_count;
+		offset += batch;
+		remaining -= batch;
 
-	/* if the buffer got full, trigger compaction here so that next
-	 * insert has free space */
-	if (state->ncentroids == BUFFER_SIZE(compression))
-		tdigest_compact(state);
+		if (state->ncentroids >= bufsize)
+			tdigest_compact(state);
+	}
 }
 
 /* allocate t-digest with enough space for a requested number of centroids */
@@ -1450,7 +1458,6 @@ tdigest_add_double_values_count(PG_FUNCTION_ARGS)
 Datum
 tdigest_add_digest(PG_FUNCTION_ARGS)
 {
-	int					i;
 	tdigest_aggstate_t *state;
 	tdigest_t		   *digest;
 
@@ -1515,9 +1522,8 @@ tdigest_add_digest(PG_FUNCTION_ARGS)
 		state = (tdigest_aggstate_t *) PG_GETARG_POINTER(0);
 
 	/* copy data from the tdigest into the aggstate */
-	for (i = 0; i < digest->ncentroids; i++)
-		tdigest_add_centroid(state, digest->centroids[i].mean,
-									digest->centroids[i].count);
+	tdigest_add_centroids_bulk(state, digest->centroids,
+							   digest->ncentroids);
 
 	PG_RETURN_POINTER(state);
 }
@@ -1529,7 +1535,6 @@ tdigest_add_digest(PG_FUNCTION_ARGS)
 Datum
 tdigest_add_digest_values(PG_FUNCTION_ARGS)
 {
-	int					i;
 	tdigest_aggstate_t *state;
 	tdigest_t		   *digest;
 
@@ -1591,9 +1596,9 @@ tdigest_add_digest_values(PG_FUNCTION_ARGS)
 	else
 		state = (tdigest_aggstate_t *) PG_GETARG_POINTER(0);
 
-	for (i = 0; i < digest->ncentroids; i++)
-		tdigest_add_centroid(state, digest->centroids[i].mean,
-									digest->centroids[i].count);
+	/* copy data from the tdigest into the aggstate */
+	tdigest_add_centroids_bulk(state, digest->centroids,
+							   digest->ncentroids);
 
 	PG_RETURN_POINTER(state);
 }
@@ -1895,7 +1900,6 @@ tdigest_add_double_array_values_count(PG_FUNCTION_ARGS)
 Datum
 tdigest_add_digest_array(PG_FUNCTION_ARGS)
 {
-	int					i;
 	tdigest_aggstate_t *state;
 	tdigest_t		   *digest;
 
@@ -1953,9 +1957,9 @@ tdigest_add_digest_array(PG_FUNCTION_ARGS)
 	else
 		state = (tdigest_aggstate_t *) PG_GETARG_POINTER(0);
 
-	for (i = 0; i < digest->ncentroids; i++)
-		tdigest_add_centroid(state, digest->centroids[i].mean,
-									digest->centroids[i].count);
+	/* copy data from the tdigest into the aggstate */
+	tdigest_add_centroids_bulk(state, digest->centroids,
+							   digest->ncentroids);
 
 	PG_RETURN_POINTER(state);
 }
@@ -1967,7 +1971,6 @@ tdigest_add_digest_array(PG_FUNCTION_ARGS)
 Datum
 tdigest_add_digest_array_values(PG_FUNCTION_ARGS)
 {
-	int					i;
 	tdigest_aggstate_t *state;
 	tdigest_t		   *digest;
 
@@ -2023,9 +2026,9 @@ tdigest_add_digest_array_values(PG_FUNCTION_ARGS)
 	else
 		state = (tdigest_aggstate_t *) PG_GETARG_POINTER(0);
 
-	for (i = 0; i < digest->ncentroids; i++)
-		tdigest_add_centroid(state, digest->centroids[i].mean,
-									digest->centroids[i].count);
+	/* copy data from the tdigest into the aggstate */
+	tdigest_add_centroids_bulk(state, digest->centroids,
+							   digest->ncentroids);
 
 	PG_RETURN_POINTER(state);
 }
@@ -2524,7 +2527,6 @@ tdigest_add_double_array_increment(PG_FUNCTION_ARGS)
 Datum
 tdigest_union_double_increment(PG_FUNCTION_ARGS)
 {
-	int					i;
 	tdigest_aggstate_t *state;
 	tdigest_t		   *digest;
 	bool				compact = PG_GETARG_BOOL(2);
@@ -2547,9 +2549,8 @@ tdigest_union_double_increment(PG_FUNCTION_ARGS)
 	AssertCheckTDigest(digest);
 
 	/* copy data from the tdigest into the aggstate */
-	for (i = 0; i < digest->ncentroids; i++)
-		tdigest_add_centroid(state, digest->centroids[i].mean,
-									digest->centroids[i].count);
+	tdigest_add_centroids_bulk(state, digest->centroids,
+							   digest->ncentroids);
 
 	AssertCheckTDigestAggState(state);
 
@@ -3101,7 +3102,6 @@ tdigest_add_double_count_trimmed(PG_FUNCTION_ARGS)
 Datum
 tdigest_add_digest_trimmed(PG_FUNCTION_ARGS)
 {
-	int					i;
 	tdigest_aggstate_t *state;
 	tdigest_t		   *digest;
 
@@ -3152,9 +3152,9 @@ tdigest_add_digest_trimmed(PG_FUNCTION_ARGS)
 	else
 		state = (tdigest_aggstate_t *) PG_GETARG_POINTER(0);
 
-	for (i = 0; i < digest->ncentroids; i++)
-		tdigest_add_centroid(state, digest->centroids[i].mean,
-									digest->centroids[i].count);
+	/* copy data from the tdigest into the aggstate */
+	tdigest_add_centroids_bulk(state, digest->centroids,
+							   digest->ncentroids);
 
 	PG_RETURN_POINTER(state);
 }
