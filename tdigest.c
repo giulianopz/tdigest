@@ -2366,7 +2366,6 @@ tdigest_combine(PG_FUNCTION_ARGS)
 static tdigest_aggstate_t *
 tdigest_digest_to_aggstate(tdigest_t *digest)
 {
-	int					i;
 	tdigest_aggstate_t *state;
 
 	/* make sure we get digest with the new format */
@@ -2378,11 +2377,17 @@ tdigest_digest_to_aggstate(tdigest_t *digest)
 
 	state = tdigest_aggstate_allocate(0, 0, digest->compression);
 
-	/* copy data from the tdigest into the aggstate */
-	for (i = 0; i < digest->ncentroids; i++)
-		tdigest_add_centroid(state,
-							 digest->centroids[i].mean,
-							 digest->centroids[i].count);
+	Assert(digest->ncentroids <= BUFFER_SIZE(digest->compression));
+
+	/*
+	 * The input digest is already compacted and sorted, so we can directly
+	 * memcpy the centroids instead of adding them one by one.
+	 */
+	memcpy(state->centroids, digest->centroids,
+		   digest->ncentroids * sizeof(centroid_t));
+	state->ncentroids = digest->ncentroids;
+	state->ncompacted = digest->ncentroids;
+	state->count = digest->count;
 
 	return state;
 }
